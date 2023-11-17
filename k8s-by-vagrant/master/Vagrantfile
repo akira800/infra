@@ -1,0 +1,129 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+  # config.vm.box = "base"
+  config.vm.box = "ubuntu/jammy64"
+  config.vbguest.auto_update = false
+  config.hostmanager.enable = false
+  config.hostmanager.manage_host = true
+  config.hostmanager.include_offline = true
+  config.hostmanager.ignore_private_ip = false
+
+  # master
+  config.vm.define :master do |config|
+    config.vm.provider :virtualbox do |vb|
+      vb.name = "master"
+      vb.gui = false
+      vb.cpus = 2
+      vb.memory = 4096
+      # vb.customize ["modifyvm", :id, "--cpus", "2"]
+      # vb.customize ["modifyvm", :id, "--memory", "4096"]
+    end
+    config.vm.hostname = "master"
+    # config.vm.synced_folder ".", "/vargrant", disabled: true
+    config.vm.network "public_network", bridge: 'en0: Wi-Fi (AirPort)', ip: "172.16.3.81"
+    config.disksize.size = "15GB"
+    config.vm.provision "set_net_foward", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+cat <<-'EOF' >/etc/modules-load.d/kubernetes.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+cat <<-'EOF' >/etc/sysctl.d/kubernetes.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+sudo sysctl --system
+SHELL
+
+    config.vm.provision "set_containerd", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl gnupg2 gnupg-agent software-properties-common apt-transport-https ca-certificates
+
+sudo rm -f /etc/apt/trusted.gpg.d/docker.gpg
+sudo rm -f /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/docker.gpg
+sudo curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg| sudo gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo DEBIAN_FRONTEND=noninteractive add-apt-repository -y "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y containerd.io
+
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+sudo sed -i 's#registry.k8s.io/pause:3.6#registry.k8s.io/pause:3.9#g' /etc/containerd/config.toml
+
+sudo systemctl daemon-reload
+
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+SHELL
+
+    config.vm.provision "set_kubelet", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+cat <<-'EOF' >/etc/default/kubelet
+KUBELET_EXTRA_ARGS=--node-ip=172.16.3.81
+EOF
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y kubelet kubeadm kubectl
+sudo DEBIAN_FRONTEND=noninteractive apt-mark hold kubelet kubeadm kubectl
+SHELL
+
+    config.vm.provision "set_kube_join_sh", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+OUTPUT_FILE=/vagrant/join.sh
+rm -rf $OUTPUT_FILE
+rm -rf /vagrant/.kube
+sudo kubeadm config images pull --cri-socket=unix:///run/containerd/containerd.sock
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --control-plane-endpoint=172.16.3.81 --apiserver-advertise-address=172.16.3.81  --cri-socket=unix:///run/containerd/containerd.sock
+sudo kubeadm token create --print-join-command > $OUTPUT_FILE
+chmod +x $OUTPUT_FILE
+SHELL
+
+    config.vm.provision "set_kubadmin", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+mkdir -p $HOME/.kube
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+cp -R $HOME/.kube /vagrant/.kube
+cp -R $HOME/.kube /home/vagrant/.kube
+sudo chown -R vagrant:vagrant /home/vagrant/.kube
+# kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+kubectl completion bash >/etc/bash_completion.d/kubectl
+echo 'alias k=kubectl' >>/home/vagrant/.bashrc
+SHELL
+
+    config.vm.provision "set_harbor", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+git clone https://github.com/litmudoc/vbox_harbor_installer.git $HOME/vbox_harbor_installer
+chmod +x $HOME/vbox_harbor_installer/harbor.sh
+IPorFQDN=192.168.1.200 $HOME/vbox_harbor_installer/harbor.sh
+sudo chmod 666 /home/vagrant/harbor/common/config/*/env
+SHELL
+
+    config.vm.provision "restart_harbor", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+cd /home/vagrant/harbor
+docker compose stop
+docker compose start
+SHELL
+
+    config.vm.provision "set_upgrade_reboot", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade
+[ -f /var/run/reboot-required ] && sudo reboot -f
+SHELL
+    end
+end

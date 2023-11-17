@@ -1,0 +1,89 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+  # config.vm.box = "base"
+  config.vm.box = "ubuntu/jammy64"
+  config.vbguest.auto_update = false
+  config.hostmanager.enable = false
+  config.hostmanager.manage_host = true
+  config.hostmanager.include_offline = true
+  config.hostmanager.ignore_private_ip = false
+
+  # worker01
+  config.vm.define :worker01 do |config|
+    config.vm.provider :virtualbox do |vb|
+      vb.name = "worker01"
+      vb.gui = false
+      vb.cpus = 2
+      vb.memory = 4096
+    end
+    config.vm.hostname = "worker01"
+    # config.vm.synced_folder ".", "/vargrant", disabled: true
+    config.vm.network "public_network", bridge: 'en0: Wi-Fi (AirPort)', ip: "172.16.3.82"
+    config.disksize.size = "25GB"
+    config.vm.provision "0", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+cat <<-'EOF' >/etc/modules-load.d/kubernetes.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+cat <<-'EOF' >/etc/sysctl.d/kubernetes.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+sudo sysctl --system
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+
+sudo rm -f /etc/apt/trusted.gpg.d/docker.gpg
+sudo rm -f /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/docker.gpg
+sudo curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg| sudo gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo DEBIAN_FRONTEND=noninteractive add-apt-repository -y "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y containerd.io
+
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+sudo sed -i 's#registry.k8s.io/pause:3.6#registry.k8s.io/pause:3.9#g' /etc/containerd/config.toml
+
+sudo systemctl daemon-reload
+
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+
+cat <<-'EOF' >/etc/default/kubelet
+KUBELET_EXTRA_ARGS=--node-ip=172.16.3.82
+EOF
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y kubelet kubeadm kubectl
+sudo DEBIAN_FRONTEND=noninteractive apt-mark hold kubelet kubeadm kubectl
+SHELL
+
+    config.vm.provision "set_upgrade_reboot", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade
+[ -f /var/run/reboot-required ] && sudo reboot -f
+SHELL
+  end
+end
