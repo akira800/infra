@@ -25,14 +25,20 @@ Vagrant.configure("2") do |config|
     config.vm.provider :virtualbox do |vb|
       vb.name = "master"
       vb.gui = false
-      vb.cpus = 2
+      vb.cpus = 3
       vb.memory = 4096
-      # vb.customize ["modifyvm", :id, "--cpus", "2"]
-      # vb.customize ["modifyvm", :id, "--memory", "4096"]
+
+      # Extention Disk Add For Rook-Ceph
+#       secondDisk = '/Users/a201401461/VirtualBox VMs/master/secondDisk.vdi'
+#       unless File.exist?(secondDisk)
+#         vb.customize ['createhd', '--filename', secondDisk, '--variant', 'Fixed', '--size', 10 * 1024]
+#       end
+#       vb.customize ['storageattach', :id,  '--storagectl', 'SCSI', '--port', 2, '--device', 0, '--type', 'hdd', '--medium', secondDisk]
+
     end
     config.vm.hostname = "master"
     # config.vm.synced_folder ".", "/vargrant", disabled: true
-    config.vm.network "public_network", bridge: 'en0: Wi-Fi (AirPort)', ip: "172.16.3.81"
+    config.vm.network "public_network", bridge: 'en0: Wi-Fi (Wireless)', ip: "172.16.3.81"
     config.disksize.size = "15GB"
     config.vm.provision "set_net_foward", type: "shell", preserve_order: true, privileged: true, inline: <<-SHELL
 cat <<-'EOF' >/etc/modules-load.d/kubernetes.conf
